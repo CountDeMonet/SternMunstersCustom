@@ -1,6 +1,12 @@
-/* Spot multiball: stock C shot/scoring rules with only the requested
+/* Spot multiball: stock shot/scoring rules for SPOT with only the
  * timer, starting ball count, add-ball and one-ball ending changes.
- * Exact stock baseline preserved in analysis/stock_spot/baseline_before_multiball.
+ * 
+ * Core changes from the stock SPOT mode
+ * 1. Timer Removed, the mode stops when you drain down to 1 ball
+ * 2. Starts as a 2 ball multiball on Spot 1 and increases the ball count by 1 each time you pass munster madness
+ * 3. It will not light add a ball at dragula during spot mode
+ * 4. Only Lily can be stacked just like the stock mode. 
+ *
  */
 #include "pad_munsters.h"
 #define MODE_NAME "Spot multiball"
