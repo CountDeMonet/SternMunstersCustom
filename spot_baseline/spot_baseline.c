@@ -1,14 +1,13 @@
-/* Stock Spot shot decisions, translated from Munsters Pro 1.28 cspot_mode
- * v[25] (0xd3ca8..0xd3ef4). Stock qualification, START/STOP, clock, displays,
- * toy control and the shared Super Jackpot system remain the game's own.
- * No prototype multiball rules. The original handler is never called by this
- * handler once the build-checked bridge is ready. See BASELINE.md for evidence.
+/* Spot multiball: stock C shot/scoring rules with only the requested
+ * timer, starting ball count, add-ball and one-ball ending changes.
+ * Exact stock baseline preserved in analysis/stock_spot/baseline_before_multiball.
  */
 #include "pad_munsters.h"
-#define MODE_NAME "Stock Spot baseline"
+#define MODE_NAME "Spot multiball"
 static long phase_at, hits_at, post_at, once_at;
 static int ready;
 static unsigned entries;
+static unsigned mb_pending, mb_active, mb_seen, mb_target, mb_player;
 static void *badge, *badge_words;
 static unsigned badge_active, badge_player, badge_ticks;
 static void badge_update(void) {
@@ -26,6 +25,33 @@ static void badge_update(void) {
     if(badge) pm_show(badge,(int)show);
 }
 static void badge_tick(void) {
+    struct pm_stock_rule *r=pm_stock_rule(17);
+    int balls;
+    if((mb_pending || mb_active) && r) {
+        if(!pm_in_game() || pm_player()!=mb_player || pm_stock_active(r)!=1) {
+            mb_pending=mb_active=mb_seen=0;
+            pm_munsters_spot_multiball_guard(0);
+        } else if(mb_pending) {
+            /* Deferred from native START: never serve inside its dispatch. */
+            mb_pending=0;
+            if(pm_multiball_start(mb_target,0)) {
+                mb_active=1;
+                pm_log("SPOT MB serving target=%u level=%u player=%u; no timer, no add-a-ball",mb_target,pm_munsters_spot_level(),mb_player);
+            } else {
+                pm_log("SPOT MB initial serve refused; ending through native STOP");
+                pm_stock_stop(r,0);
+            }
+        } else {
+            balls=pm_balls_in_play();
+            if(balls>=2) mb_seen=1;
+            /* The initial one-ball state is not a drain. Wait until the
+             * framework has actually reported multiball before arming end. */
+            if(mb_seen && balls>=0 && balls<=1) {
+                pm_log("SPOT MB ended: %d ball(s) remain",balls);
+                pm_stock_stop(r,0);
+            }
+        }
+    }
     if(++badge_ticks%30==0 || !badge) badge_update();
 }
 static const struct pm_mode spot_baseline;
@@ -55,10 +81,7 @@ static int spot_shot(struct pm_stock_rule *r,uint64_t dispatched,unsigned factor
             pm_stock_w_set(r,phase_at,1);
             pm_munsters_spot_cancel_sequence();
             pm_munsters_spot_dirty();
-            if(pm_munsters_spot_timer_live(r) && !read_byte(r,once_at)) {
-                pm_munsters_spot_timer_extend(r);
-                pm_stock_b_set(r,once_at,1);
-            }
+
         } else pm_munsters_spot_grow(r,bucket ? 175000u : 75000u,bucket);
         state(r,"shot handled");
         return PM_STOCK_DONE;
@@ -66,7 +89,6 @@ static int spot_shot(struct pm_stock_rule *r,uint64_t dispatched,unsigned factor
     if(shot!=0x800000u || read_word(r,phase_at)!=1) return PM_STOCK_DONE;
 hit:
     points=pm_munsters_spot_collect(r,bucket);
-    pm_munsters_spot_timer_refresh(r);
     hits=(unsigned)read_word(r,hits_at)+1u;
     pm_stock_w_set(r,hits_at,(int)hits);
     if(hits>3u) {
@@ -87,16 +109,32 @@ static void started(struct pm_stock_rule *r) {
     entries=0;
     badge_active=ready && pm_munsters_spot_ready() && pm_stock_active(r)==1;
     badge_player=pm_player();
+    mb_pending=mb_active=mb_seen=0;
+    if(badge_active) {
+        mb_player=badge_player;
+        mb_target=pm_munsters_spot_level();
+        if(mb_target<1) mb_target=1;
+        if(mb_target>5) mb_target=5; /* SDK limit; engine also clips to installed balls. */
+        ++mb_target;
+        if(pm_munsters_spot_clock_off(r)) {
+            pm_munsters_spot_multiball_guard(1);
+            mb_pending=1;
+        } else {
+            pm_log("SPOT MB clock control failed; ending through native STOP");
+            pm_stock_stop(r,0);
+        }
+    }
     badge_update();
     pm_log("VISUAL MARKER: CUSTOM SPOT %s",badge_active ? "enabled" : "off");
     state(r,"START native");
 }
-static void stopped(struct pm_stock_rule *r,unsigned reason) { badge_active=0; badge_update(); pm_log("STOP native reason=%u",reason); state(r,"STOP"); }
+static void stopped(struct pm_stock_rule *r,unsigned reason) { mb_pending=mb_active=mb_seen=0; pm_munsters_spot_multiball_guard(0); badge_active=0; badge_update(); pm_log("STOP native reason=%u",reason); state(r,"STOP"); }
 static void init(void) {
     phase_at=pm_stock_at("spot_phase_at"); hits_at=pm_stock_at("spot_hits_at");
     post_at=pm_stock_at("spot_post_super_at"); once_at=pm_stock_at("spot_timer_extended_at");
     ready=pm_munsters_spot_ready() && phase_at>=0 && hits_at>=0 && post_at>=0 && once_at>=0;
-    pm_log("%s: C shot decisions; native lifecycle, mechanism, awards and supers",ready ? "READY" : "DISABLED");
+    ready=ready && pm_munsters_spot_multiball_arm();
+    pm_log("%s: C shot decisions; Spot multiball lifecycle; native mechanism, awards and supers",ready ? "READY" : "DISABLED");
 }
 static const struct pm_mode spot_baseline={.name=MODE_NAME,.init=init,.tick=badge_tick};
 PM_REGISTER(spot_baseline);
