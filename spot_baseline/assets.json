@@ -1,6 +1,18 @@
 {
   "format": 1,
-  "name": "Stock Spot baseline",
-  "screen": false,
+  "name": "CUSTOM SPOT",
+  "screen": true,
+  "panel_color": "#103c28",
+  "title_color": "#c2ff83",
+  "screen_layout": {
+    "x": 940,
+    "y": 140,
+    "scale": 0.3,
+    "words_x": 0,
+    "words_y": 0,
+    "words_scale": 0.3,
+    "order": 999
+  },
+  "info_line": false,
   "title": "munsters_pro_1_28"
 }

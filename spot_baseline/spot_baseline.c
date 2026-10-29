@@ -9,8 +9,25 @@
 static long phase_at, hits_at, post_at, once_at;
 static int ready;
 static unsigned entries;
-static unsigned marker_on, marker_player, marker_ticks;
-#define SPOT_TITLE_MESSAGE 2930u
+static void *badge, *badge_words;
+static unsigned badge_active, badge_player, badge_ticks;
+static void badge_update(void) {
+    struct pm_stock_rule *r;
+    unsigned show=badge_active;
+    if(show) {
+        r=pm_stock_rule(17);
+        if(!ready || !pm_in_game() || pm_player()!=badge_player || !r || pm_stock_active(r)!=1)
+            show=badge_active=0;
+    }
+    if(!pm_can(PM_CAN_SCREENS)) return;
+    badge=pm_node("hud","PadMode_spot_baseline_Screen");
+    badge_words=badge ? pm_text("hud","PadMode_spot_baseline_Screen.PadMode_spot_baseline_Screen_Words") : 0;
+    if(badge_words) pm_set_text(badge_words,"");
+    if(badge) pm_show(badge,(int)show);
+}
+static void badge_tick(void) {
+    if(++badge_ticks%30==0 || !badge) badge_update();
+}
 static const struct pm_mode spot_baseline;
 static int read_word(struct pm_stock_rule *r,long at) { int v=0; pm_stock_w_get(r,at,&v); return v; }
 static int read_byte(struct pm_stock_rule *r,long at) { int v=0; pm_stock_b_get(r,at,&v); return v; }
@@ -66,37 +83,24 @@ hit:
     state(r,"Spot hit");
     return PM_STOCK_DONE;
 }
-static void marker_clear(void) {
-    if(marker_on) pm_message_restore(SPOT_TITLE_MESSAGE);
-    marker_on=marker_player=0;
-}
 static void started(struct pm_stock_rule *r) {
     entries=0;
-    if(ready && pm_munsters_spot_ready() && pm_stock_active(r)==1) {
-        marker_on=pm_message_set(SPOT_TITLE_MESSAGE,"CUSTOM SPOT");
-        marker_player=pm_player();
-        pm_log("VISUAL MARKER: %s",marker_on ? "CUSTOM SPOT enabled" : "title unavailable");
-    }
+    badge_active=ready && pm_munsters_spot_ready() && pm_stock_active(r)==1;
+    badge_player=pm_player();
+    badge_update();
+    pm_log("VISUAL MARKER: CUSTOM SPOT %s",badge_active ? "enabled" : "off");
     state(r,"START native");
 }
-static void marker_tick(void) {
-    struct pm_stock_rule *r;
-    if(++marker_ticks%30 || !marker_on) return;
-    r=pm_stock_rule(17);
-    if(!ready || !pm_in_game() || pm_player()!=marker_player || !r || pm_stock_active(r)!=1)
-        marker_clear();
-}
-static void stopped(struct pm_stock_rule *r,unsigned reason) { marker_clear(); pm_log("STOP native reason=%u",reason); state(r,"STOP"); }
+static void stopped(struct pm_stock_rule *r,unsigned reason) { badge_active=0; badge_update(); pm_log("STOP native reason=%u",reason); state(r,"STOP"); }
 static void init(void) {
     phase_at=pm_stock_at("spot_phase_at"); hits_at=pm_stock_at("spot_hits_at");
     post_at=pm_stock_at("spot_post_super_at"); once_at=pm_stock_at("spot_timer_extended_at");
     ready=pm_munsters_spot_ready() && phase_at>=0 && hits_at>=0 && post_at>=0 && once_at>=0;
     pm_log("%s: C shot decisions; native lifecycle, mechanism, awards and supers",ready ? "READY" : "DISABLED");
 }
-static const struct pm_mode spot_baseline={.name=MODE_NAME,.init=init,.tick=marker_tick};
+static const struct pm_mode spot_baseline={.name=MODE_NAME,.init=init,.tick=badge_tick};
 PM_REGISTER(spot_baseline);
 static const struct pm_stock_handler spot_handler={.rule_id=17,.shot=spot_shot,.started=started,.stopped=stopped,.name=MODE_NAME,.mode=&spot_baseline};
 #ifndef SPOT_CONTROL
 PM_STOCK_RULE(spot_handler);
 #endif
-
