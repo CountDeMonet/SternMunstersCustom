@@ -10,10 +10,56 @@
  */
 #include "pad_munsters.h"
 #define MODE_NAME "Spot multiball"
+/* Experimental Quick Shot: set ENABLED to 0 to compare with the stable rules. */
+#define QUICK_SHOT_ENABLED 1
+#define QUICK_SHOT_WINDOW_MS 5000ul
+#define QUICK_SHOT_BONUS 1000000ull
+#define QUICK_SHOT_LAMP "LEFT RAMP JACKPOT"
+#define QUICK_SHOT_FLASH_MS 200u
 static long phase_at, hits_at, post_at, once_at;
 static int ready;
 static unsigned entries;
 static unsigned mb_pending, mb_active, mb_seen, mb_target, mb_player;
+static int qs_enabled,qs_active,qs_was_ready;
+static unsigned qs_player,qs_collections;
+static unsigned long qs_started;
+static uint64_t qs_total;
+static void quick_reset(void) {
+    if(qs_active) pm_lamp_release(QUICK_SHOT_LAMP);
+    qs_active=qs_was_ready=0;qs_player=0;
+}
+static void quick_sync(struct pm_stock_rule *r) {
+    int up;
+    unsigned long now=pm_ms();
+    if(!qs_enabled || !r || !pm_in_game() || pm_player()!=mb_player || pm_stock_active(r)!=1) {
+        quick_reset();return;
+    }
+    up=pm_munsters_spot_quick_ready(r);
+    if(!up) {
+        if(qs_active) pm_lamp_release(QUICK_SHOT_LAMP);
+        qs_active=qs_was_ready=0;return;
+    }
+    if(!qs_was_ready) {
+        qs_was_ready=1;
+        if(pm_lamp_set(QUICK_SHOT_LAMP,PM_RGB(255,255,0),PM_LAMP_BLINK,QUICK_SHOT_FLASH_MS)>0) {
+            qs_active=1;qs_player=pm_player();qs_started=now;
+            pm_log("QUICK SHOT armed p%u window=%lums bonus=%llu lamp=%s",qs_player,QUICK_SHOT_WINDOW_MS,(unsigned long long)QUICK_SHOT_BONUS,QUICK_SHOT_LAMP);
+        } else pm_log("QUICK SHOT not armed: cue lamp unavailable");
+    }
+    if(qs_active && (unsigned long)(now-qs_started)>=QUICK_SHOT_WINDOW_MS) {
+        qs_active=0;pm_lamp_release(QUICK_SHOT_LAMP);
+        pm_log("QUICK SHOT expired p%u",qs_player);
+    }
+}
+static int quick_take(struct pm_stock_rule *r) {
+    int earned;
+    quick_sync(r);
+    earned=qs_active && qs_player==pm_player() &&
+        (unsigned long)(pm_ms()-qs_started)<QUICK_SHOT_WINDOW_MS;
+    if(qs_active) pm_lamp_release(QUICK_SHOT_LAMP);
+    qs_active=0; /* Keep the edge latch: one opportunity per native raise. */
+    return earned;
+}
 static void *badge, *badge_words;
 static unsigned badge_active, badge_player, badge_ticks;
 static void badge_update(void) {
@@ -58,6 +104,7 @@ static void badge_tick(void) {
             }
         }
     }
+    quick_sync(r);
     if(++badge_ticks%30==0 || !badge) badge_update();
 }
 static const struct pm_mode spot_baseline;
@@ -72,7 +119,8 @@ static void state(struct pm_stock_rule *r,const char *why) {
 }
 static int spot_shot(struct pm_stock_rule *r,uint64_t dispatched,unsigned factor) {
     unsigned p=pm_stock_player(),shot=(unsigned)dispatched,bucket,hits,remaining=0,just_lit=0;
-    uint64_t field,points;
+    uint64_t field,points,bonus=0;
+    int quick;
     (void)factor; /* Munsters' handler has (this, uint32_t shot), no factor. */
     if(!ready || !pm_munsters_spot_ready()) return PM_STOCK_PASS;
     ++entries;
@@ -94,7 +142,13 @@ static int spot_shot(struct pm_stock_rule *r,uint64_t dispatched,unsigned factor
     }
     if(shot!=0x800000u || read_word(r,phase_at)!=1) return PM_STOCK_DONE;
 hit:
+    quick=quick_take(r);
     points=pm_munsters_spot_collect(r,bucket);
+    if(quick) {
+        bonus=pm_munsters_spot_flat_bonus(r,QUICK_SHOT_BONUS);
+        if(bonus) {++qs_collections;qs_total+=bonus;}
+        pm_log("QUICK SHOT collected p%u bonus=%llu count=%u total=%llu",p,(unsigned long long)bonus,qs_collections,(unsigned long long)qs_total);
+    }
     hits=(unsigned)read_word(r,hits_at)+1u;
     pm_stock_w_set(r,hits_at,(int)hits);
     if(hits>3u) {
@@ -107,11 +161,12 @@ hit:
         pm_stock_field_set(r,p,0x1du);
         pm_munsters_spot_sequence(1);
     } else pm_munsters_spot_sequence(0);
-    pm_munsters_spot_feedback(points,remaining,just_lit);
+    pm_munsters_spot_feedback(points+bonus,remaining,just_lit);
     state(r,"Spot hit");
     return PM_STOCK_DONE;
 }
 static void started(struct pm_stock_rule *r) {
+    quick_reset();qs_collections=0;qs_total=0;
     entries=0;
     badge_active=ready && pm_munsters_spot_ready() && pm_stock_active(r)==1;
     badge_player=pm_player();
@@ -134,12 +189,14 @@ static void started(struct pm_stock_rule *r) {
     pm_log("VISUAL MARKER: CUSTOM SPOT %s",badge_active ? "enabled" : "off");
     state(r,"START native");
 }
-static void stopped(struct pm_stock_rule *r,unsigned reason) { mb_pending=mb_active=mb_seen=0; pm_munsters_spot_multiball_guard(0); badge_active=0; badge_update(); pm_log("STOP native reason=%u",reason); state(r,"STOP"); }
+static void stopped(struct pm_stock_rule *r,unsigned reason) { quick_reset(); mb_pending=mb_active=mb_seen=0; pm_munsters_spot_multiball_guard(0); badge_active=0; badge_update(); pm_log("STOP native reason=%u",reason); state(r,"STOP"); }
 static void init(void) {
     phase_at=pm_stock_at("spot_phase_at"); hits_at=pm_stock_at("spot_hits_at");
     post_at=pm_stock_at("spot_post_super_at"); once_at=pm_stock_at("spot_timer_extended_at");
     ready=pm_munsters_spot_ready() && phase_at>=0 && hits_at>=0 && post_at>=0 && once_at>=0;
     ready=ready && pm_munsters_spot_multiball_arm();
+    qs_enabled=QUICK_SHOT_ENABLED && ready && pm_munsters_spot_quick_supported() && pm_can(PM_CAN_LAMPS) && pm_lamp_find(QUICK_SHOT_LAMP)>=0;
+    pm_log("Quick Shot %s: %lums, flat %llu; %s flashes yellow",qs_enabled ? "enabled" : "disabled",QUICK_SHOT_WINDOW_MS,(unsigned long long)QUICK_SHOT_BONUS,QUICK_SHOT_LAMP);
     pm_log("%s: C shot decisions; Spot multiball lifecycle; native mechanism, awards and supers",ready ? "READY" : "DISABLED");
 }
 static const struct pm_mode spot_baseline={.name=MODE_NAME,.init=init,.tick=badge_tick};
