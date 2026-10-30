@@ -13,7 +13,9 @@
 /* Experimental Quick Shot: set ENABLED to 0 to compare with the stable rules. */
 #define QUICK_SHOT_ENABLED 1
 #define QUICK_SHOT_WINDOW_MS 5000ul
-#define QUICK_SHOT_BONUS 1000000ull
+#define QUICK_SHOT_BASE_BONUS 1000000ull
+#define QUICK_SHOT_EXTRA_BALL_BONUS 250000ull
+#define QUICK_SHOT_MAX_BALLS 6
 #define QUICK_SHOT_LAMP "LEFT RAMP JACKPOT"
 #define QUICK_SHOT_FLASH_MS 200u
 static long phase_at, hits_at, post_at, once_at;
@@ -24,6 +26,13 @@ static int qs_enabled,qs_active,qs_was_ready;
 static unsigned qs_player,qs_collections;
 static unsigned long qs_started;
 static uint64_t qs_total;
+/* Sample at collection: a drain during the window immediately lowers its value.
+ * Unknown/transition counts retain only the base bonus; never use the serve target. */
+static uint64_t quick_value(int balls) {
+    if(balls<2) balls=2;
+    if(balls>QUICK_SHOT_MAX_BALLS) balls=QUICK_SHOT_MAX_BALLS;
+    return QUICK_SHOT_BASE_BONUS+(uint64_t)(balls-2)*QUICK_SHOT_EXTRA_BALL_BONUS;
+}
 static void quick_reset(void) {
     if(qs_active) pm_lamp_release(QUICK_SHOT_LAMP);
     qs_active=qs_was_ready=0;qs_player=0;
@@ -43,7 +52,7 @@ static void quick_sync(struct pm_stock_rule *r) {
         qs_was_ready=1;
         if(pm_lamp_set(QUICK_SHOT_LAMP,PM_RGB(255,255,0),PM_LAMP_BLINK,QUICK_SHOT_FLASH_MS)>0) {
             qs_active=1;qs_player=pm_player();qs_started=now;
-            pm_log("QUICK SHOT armed p%u window=%lums bonus=%llu lamp=%s",qs_player,QUICK_SHOT_WINDOW_MS,(unsigned long long)QUICK_SHOT_BONUS,QUICK_SHOT_LAMP);
+            pm_log("QUICK SHOT armed p%u window=%lums bonus_at_hit=live_ball_count lamp=%s",qs_player,QUICK_SHOT_WINDOW_MS,QUICK_SHOT_LAMP);
         } else pm_log("QUICK SHOT not armed: cue lamp unavailable");
     }
     if(qs_active && (unsigned long)(now-qs_started)>=QUICK_SHOT_WINDOW_MS) {
@@ -120,7 +129,7 @@ static void state(struct pm_stock_rule *r,const char *why) {
 static int spot_shot(struct pm_stock_rule *r,uint64_t dispatched,unsigned factor) {
     unsigned p=pm_stock_player(),shot=(unsigned)dispatched,bucket,hits,remaining=0,just_lit=0;
     uint64_t field,points,bonus=0;
-    int quick;
+    int quick,quick_balls=0;
     (void)factor; /* Munsters' handler has (this, uint32_t shot), no factor. */
     if(!ready || !pm_munsters_spot_ready()) return PM_STOCK_PASS;
     ++entries;
@@ -143,11 +152,12 @@ static int spot_shot(struct pm_stock_rule *r,uint64_t dispatched,unsigned factor
     if(shot!=0x800000u || read_word(r,phase_at)!=1) return PM_STOCK_DONE;
 hit:
     quick=quick_take(r);
+    if(quick) {quick_balls=pm_balls_in_play();bonus=quick_value(quick_balls);}
     points=pm_munsters_spot_collect(r,bucket);
     if(quick) {
-        bonus=pm_munsters_spot_flat_bonus(r,QUICK_SHOT_BONUS);
+        bonus=pm_munsters_spot_flat_bonus(r,bonus);
         if(bonus) {++qs_collections;qs_total+=bonus;}
-        pm_log("QUICK SHOT collected p%u bonus=%llu count=%u total=%llu",p,(unsigned long long)bonus,qs_collections,(unsigned long long)qs_total);
+        pm_log("QUICK SHOT collected p%u balls=%d bonus=%llu count=%u total=%llu",p,quick_balls,(unsigned long long)bonus,qs_collections,(unsigned long long)qs_total);
     }
     hits=(unsigned)read_word(r,hits_at)+1u;
     pm_stock_w_set(r,hits_at,(int)hits);
@@ -196,7 +206,7 @@ static void init(void) {
     ready=pm_munsters_spot_ready() && phase_at>=0 && hits_at>=0 && post_at>=0 && once_at>=0;
     ready=ready && pm_munsters_spot_multiball_arm();
     qs_enabled=QUICK_SHOT_ENABLED && ready && pm_munsters_spot_quick_supported() && pm_can(PM_CAN_LAMPS) && pm_lamp_find(QUICK_SHOT_LAMP)>=0;
-    pm_log("Quick Shot %s: %lums, flat %llu; %s flashes yellow",qs_enabled ? "enabled" : "disabled",QUICK_SHOT_WINDOW_MS,(unsigned long long)QUICK_SHOT_BONUS,QUICK_SHOT_LAMP);
+    pm_log("Quick Shot %s: %lums, base %llu + %llu per ball above two (cap %d balls), no multipliers; %s flashes yellow",qs_enabled ? "enabled" : "disabled",QUICK_SHOT_WINDOW_MS,(unsigned long long)QUICK_SHOT_BASE_BONUS,(unsigned long long)QUICK_SHOT_EXTRA_BALL_BONUS,QUICK_SHOT_MAX_BALLS,QUICK_SHOT_LAMP);
     pm_log("%s: C shot decisions; Spot multiball lifecycle; native mechanism, awards and supers",ready ? "READY" : "DISABLED");
 }
 static const struct pm_mode spot_baseline={.name=MODE_NAME,.init=init,.tick=badge_tick};

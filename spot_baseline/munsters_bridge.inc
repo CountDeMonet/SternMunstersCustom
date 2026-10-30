@@ -158,3 +158,41 @@ void pm_munsters_spot_test_control(const char *command) {
         t ? *(volatile unsigned char *)(unsigned long)(t+0x1f) : 0,t ? rw(t+0x28) : 0,
         hud ? *(volatile unsigned char *)(unsigned long)(hud+0x1d0) : 0,spot_mb_guard,spot_mb_armed);
 }
+
+/* Quick Shot prototype: native logical readiness, never a coil command. */
+int pm_munsters_spot_quick_supported(void) {
+    return pm_munsters_spot_ready() && fn("spot_toy_get") && data("spot_toy_vtable") &&
+        fn("score_add") && data("scores") && !data("scores32");
+}
+int pm_munsters_spot_quick_ready(struct pm_stock_rule *r) {
+    unsigned o=spot_obj(r),f=fn("spot_toy_get"),t;
+    if(!o || !pm_munsters_spot_quick_supported() || pm_stock_active(r)!=1) return 0;
+    if(rw(o+0x80)!=1) return 0;
+    t=((unsigned (*)(unsigned))(unsigned long)f)(6);
+    /* Toy v[10] marks +8=2 on the native raise command, +8=1 on lower.
+     * Together with Spot phase=1 this is the game's ready state, not a
+     * position sensor. The native mechanism and sequences remain untouched. */
+    return t && rw(t)==data("spot_toy_vtable") && rw(t+8)==2;
+}
+uint64_t pm_munsters_spot_flat_bonus(struct pm_stock_rule *r,uint64_t points) {
+    unsigned o=spot_obj(r),p=pm_player(),s=data("scores"),a,f=fn("score_add");
+    volatile uint64_t *score,*total;uint64_t have,take,earned;
+    if(!o || !points || p<1 || p>4 || !pm_in_game() || pm_stock_active(r)!=1 ||
+       !pm_munsters_spot_quick_supported() || !maps_has(s,32,MAP_R)) return 0;
+    a=rw(o+0x34);
+    if(!a || !maps_has(a+0xe0+8*p,8,MAP_R)) return 0;
+    score=(volatile uint64_t *)(unsigned long)(s+8*(p-1));
+    total=(volatile uint64_t *)(unsigned long)(a+0xe0+8*p);
+    have=*score;take=points>~(uint64_t)0-have ? ~(uint64_t)0-have : points;
+    earned=*total;
+    if(take>~(uint64_t)0-earned) take=~(uint64_t)0-earned;
+    if(!take) return 0;
+    /* Same score-table + zero-point native refresh pattern as SDK pm_score_sub.
+     * No temporary global multiplier changes, no amplified award followed by
+     * subtraction, and no write to Spot's base values or boost multipliers.
+     * The native earned-total field is the one caward collect updates at
+     * 0x2af98..0x2afb0; include this bonus in Spot's ending total too. */
+    *score=have+take;*total=earned+take;
+    ((uint64_t (*)(unsigned,uint64_t))(unsigned long)f)(p,0);
+    return take;
+}
